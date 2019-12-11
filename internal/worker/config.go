@@ -2,7 +2,6 @@ package worker
 
 import (
 	"stress-test/internal/amqp"
-	_ "stress-test/internal/amqp"
 )
 
 type Config struct {

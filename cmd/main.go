@@ -72,7 +72,7 @@ func init() {
 		}
 	  },
 	  "body": {
-		"recipient": "pimshtein@gmail.com",
+		"recipient": "asdf@asdf.com",
 		"city": "Москва",
 		"checkIn": "2019-12-14",
 		"checkOut": "2019-12-15",
@@ -109,61 +109,44 @@ func main() {
 }
 
 func produceParallelRequests(uris []string, concurrencyLimit int) []rabbitResult {
-
-	// this buffered channel will block at the concurrency limit
 	semaphoreChan := make(chan struct{}, concurrencyLimit)
 
-	// this channel will not block and collect the http request results
 	resultsChan := make(chan *rabbitResult)
 
-	// make sure we close these channels when we're done with them
 	defer func() {
 		close(semaphoreChan)
 		close(resultsChan)
 	}()
 
-	// keen an index and loop through every uri we will send a request to
 	for i, uri := range uris {
 
-		// start a go routine with the index and uri in a closure
 		go func(i int, url string) {
 
-			// this sends an empty struct into the semaphoreChan which
-			// is basically saying add one to the limit, but when the
-			// limit has been reached block until there is room
+			// Buff canal (when it's full, goroutines are waiting)
 			semaphoreChan <- struct{}{}
 
 			err := producer.PublishMessage(payload, uri, "text/json")
 
 			result := &rabbitResult{i, err}
 
-			// now we can send the result struct through the resultsChan
 			resultsChan <- result
 
-			// once we're done it's we read from the semaphoreChan which
-			// has the effect of removing one from the limit and allowing
-			// another goroutine to start
 			<-semaphoreChan
 
 		}(i, uri)
 	}
 
-	// make a slice to hold the results we're expecting
 	var results []rabbitResult
 
-	// start listening for any results over the resultsChan
-	// once we get a result append it to the result slice
 	for {
 		result := <-resultsChan
 		results = append(results, *result)
 
-		// if we've reached the expected amount of uris then stop
 		if len(results) == len(uris) {
 			break
 		}
 	}
 
-	// let's sort these results real quick
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].index < results[j].index
 	})
