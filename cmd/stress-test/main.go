@@ -15,20 +15,20 @@ import (
 var config worker.Config
 
 type httpResult struct {
-	index   int
-	httpRe     *http.Response
-	httpErr *int
-	err     error
+	index        int
+	httpResponse *http.Response
+	httpErr      *int
+	err          error
 }
 
 type rabbitResult struct {
-	index   int
-	err     error
+	index int
+	err   error
 }
 
 var (
-	payload []byte
-	uris [] string
+	payload  []byte
+	uris     []string
 	producer *amqp.Producer
 )
 
@@ -122,7 +122,7 @@ func produceParallelRequests(uris []string, concurrencyLimit int) []rabbitResult
 
 		go func(i int, url string) {
 
-			// Buff canal (when it's full, goroutines are waiting)
+			// Buff channel (when it's full, goroutines are waiting)
 			semaphoreChan <- struct{}{}
 
 			err := producer.PublishMessage(payload, uri, "text/json")
