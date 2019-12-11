@@ -1,0 +1,172 @@
+package main
+
+import (
+	"fmt"
+	"github.com/jessevdk/go-flags"
+	"log"
+	"net/http"
+	"os"
+	"sort"
+	"stress-test/internal/amqp"
+	"stress-test/internal/worker"
+	"time"
+)
+
+var config worker.Config
+
+type httpResult struct {
+	index   int
+	httpRe     *http.Response
+	httpErr *int
+	err     error
+}
+
+type rabbitResult struct {
+	index   int
+	err     error
+}
+
+var (
+	payload []byte
+	uris [] string
+	producer *amqp.Producer
+)
+
+func init() {
+	parser := flags.NewParser(nil, flags.Default)
+	parser.ShortDescription = "Go stress tool"
+
+	_, err := parser.AddGroup("Rabbit consumer options", "", &config.Rabbit)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	_, err = parser.AddGroup("Parallel requests options", "", &config.ParallelRequests)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	if _, err := parser.Parse(); err != nil {
+		code := 1
+		if fe, ok := err.(*flags.Error); ok {
+			if fe.Type == flags.ErrHelp {
+				code = 0
+			}
+		}
+		os.Exit(code)
+	}
+
+	for i := 1; i <= config.ParallelRequests.RequestsNum; i++ {
+		uris = append(uris, "interceptor.local")
+	}
+
+	payload = []byte(`
+	{
+      "header": {
+		"id": "9a9e99a0-f30a-49e7-8c25-b93acb2fd939",
+		"type": "/HbPro/Hotel/CommercialOffer/Event/CommercialOfferSendingCreated/Message",
+		"time": "2019-12-10T10:37:32.676+00:00",
+		"meta": {
+		  "eventName": "CommercialOfferSendingCreated",
+		  "locale": "ru"
+		}
+	  },
+	  "body": {
+		"recipient": "pimshtein@gmail.com",
+		"city": "Москва",
+		"checkIn": "2019-12-14",
+		"checkOut": "2019-12-15",
+		"attachments": [
+		  {
+			"name": "commercialOffer.pdf",
+			"fileBase64": "aq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0SZU2qdImVdqkSptUaZMqbVKlTaq0S"
+		  }
+		]
+	  }
+	}
+	`)
+
+	producer = amqp.NewProducer(config.Rabbit.GetProducerSettings())
+}
+
+func main() {
+	benchmark := func(uris []string, concurrency int) string {
+		startTime := time.Now()
+		results := produceParallelRequests(uris, concurrency)
+		seconds := time.Since(startTime).Seconds()
+		countError := 0
+		for _, result := range results {
+			if nil != result.err {
+				countError++
+				fmt.Println(result.err)
+			}
+		}
+		template := "%d bounded parallel requests: %d/%d in %v, count of errors: %d"
+		return fmt.Sprintf(template, concurrency, len(results), len(uris), seconds, countError)
+	}
+
+	fmt.Println(benchmark(uris, config.ParallelRequests.GoNum))
+}
+
+func produceParallelRequests(uris []string, concurrencyLimit int) []rabbitResult {
+
+	// this buffered channel will block at the concurrency limit
+	semaphoreChan := make(chan struct{}, concurrencyLimit)
+
+	// this channel will not block and collect the http request results
+	resultsChan := make(chan *rabbitResult)
+
+	// make sure we close these channels when we're done with them
+	defer func() {
+		close(semaphoreChan)
+		close(resultsChan)
+	}()
+
+	// keen an index and loop through every uri we will send a request to
+	for i, uri := range uris {
+
+		// start a go routine with the index and uri in a closure
+		go func(i int, url string) {
+
+			// this sends an empty struct into the semaphoreChan which
+			// is basically saying add one to the limit, but when the
+			// limit has been reached block until there is room
+			semaphoreChan <- struct{}{}
+
+			err := producer.PublishMessage(payload, uri, "text/json")
+
+			result := &rabbitResult{i, err}
+
+			// now we can send the result struct through the resultsChan
+			resultsChan <- result
+
+			// once we're done it's we read from the semaphoreChan which
+			// has the effect of removing one from the limit and allowing
+			// another goroutine to start
+			<-semaphoreChan
+
+		}(i, uri)
+	}
+
+	// make a slice to hold the results we're expecting
+	var results []rabbitResult
+
+	// start listening for any results over the resultsChan
+	// once we get a result append it to the result slice
+	for {
+		result := <-resultsChan
+		results = append(results, *result)
+
+		// if we've reached the expected amount of uris then stop
+		if len(results) == len(uris) {
+			break
+		}
+	}
+
+	// let's sort these results real quick
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].index < results[j].index
+	})
+
+	return results
+}
